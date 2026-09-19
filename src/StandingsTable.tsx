@@ -21,6 +21,7 @@ export function StandingsTable({ standings }: Props) {
               <tr>
                 <th className="c-rank">#</th>
                 <th>选手</th>
+                <th>队伍</th>
                 <th>积分</th>
                 <th>对手分(Buchholz)</th>
                 <th>对局数</th>
@@ -34,6 +35,7 @@ export function StandingsTable({ standings }: Props) {
                   <tr key={s.player.id}>
                     <td className="c-rank">{i + 1}</td>
                     <td className="name">{s.player.name}</td>
+                    <td className="muted">{s.player.team?.trim() || '—'}</td>
                     <td className="strong">{points2Label(s.points2)}</td>
                     <td>{points2Label(s.buchholz2)}</td>
                     <td>{games}</td>

@@ -8,7 +8,14 @@ import { StandingsTable } from './StandingsTable';
 import { RoundsPanel } from './RoundsPanel';
 import { NextRoundPanel } from './NextRoundPanel';
 
-const DEMO_NAMES = ['阿尔法', '贝塔', '伽马', '德尔塔', '艾普西龙', '迪纳摩'];
+const DEMO_PLAYERS: { name: string; team: string }[] = [
+  { name: '阿尔法', team: '红队' },
+  { name: '贝塔', team: '红队' },
+  { name: '伽马', team: '蓝队' },
+  { name: '德尔塔', team: '蓝队' },
+  { name: '艾普西龙', team: '绿队' },
+  { name: '迪纳摩', team: '绿队' },
+];
 
 export default function App() {
   const [state, setState] = useState<TournamentState>(() =>
@@ -29,15 +36,26 @@ export default function App() {
     [standings],
   );
 
-  const addPlayers = (names: string[]) => {
+  const addPlayers = (entries: { name: string; team?: string }[]) => {
     setState((s) => ({
       ...s,
-      players: [...s.players, ...names.map((n) => ({ id: uid('p'), name: n }))].slice(0, 32),
+      players: [
+        ...s.players,
+        ...entries.map((e) => ({ id: uid('p'), name: e.name, team: e.team ?? '' })),
+      ].slice(0, 32),
     }));
   };
 
   const removePlayer = (id: string) => {
     setState((s) => ({ ...s, players: s.players.filter((p) => p.id !== id) }));
+  };
+
+  /** 修改队伍名称（仅影响后续配对，历史轮次与赛果保持不变） */
+  const setPlayerTeam = (id: string, team: string) => {
+    setState((s) => ({
+      ...s,
+      players: s.players.map((p) => (p.id === id ? { ...p, team } : p)),
+    }));
   };
 
   const setResult = (roundId: string, matchId: string, resultA: Match['resultA']) => {
@@ -95,7 +113,7 @@ export default function App() {
 
   const loadDemo = () => {
     if (state.players.length > 0 && !window.confirm('载入示例将覆盖当前数据，确定？')) return;
-    const players = DEMO_NAMES.map((name) => ({ id: uid('p'), name }));
+    const players = DEMO_PLAYERS.map(({ name, team }) => ({ id: uid('p'), name, team }));
     const [a, b, c, d, e, f] = players;
     const win = (x: string, y: string): Match => ({
       id: uid('m'),
@@ -119,7 +137,7 @@ export default function App() {
         <div>
           <h1>桌游联赛 · 瑞士制配对</h1>
           <p className="subtitle">
-            最多 32 人 · 禁止重复交手 · 依次最小化跨积分组对局数与总积分差 · 奇数人自动轮空
+            最多 32 人 · 禁止重复交手 · 依次最小化同队对局数、跨积分组对局数与总积分差 · 奇数人自动轮空
           </p>
         </div>
         <div className="top-actions">
@@ -143,6 +161,7 @@ export default function App() {
             hasRounds={state.rounds.length > 0}
             onAdd={addPlayers}
             onRemove={removePlayer}
+            onSetTeam={setPlayerTeam}
           />
           <StandingsTable standings={standings} />
         </div>

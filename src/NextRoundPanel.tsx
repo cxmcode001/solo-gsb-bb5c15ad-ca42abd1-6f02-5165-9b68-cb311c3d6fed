@@ -134,6 +134,10 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
                   对局数 <b>{plan.pairs.length}</b>
                 </span>
                 <span className="stat">
+                  同队对局{' '}
+                  <b className={plan.sameTeamCount > 0 ? 'danger-text' : ''}>{plan.sameTeamCount}</b>
+                </span>
+                <span className="stat">
                   跨积分组对局 <b className={plan.crossCount > 0 ? 'accent' : ''}>{plan.crossCount}</b>
                 </span>
                 <span className="stat">
@@ -147,8 +151,12 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
               </div>
 
               <p className="hint">
-                目标顺序：① 禁止重复交手 → ② 跨积分组对局数最少 → ③ 双方总积分差之和最小。
+                目标顺序：① 禁止重复交手 → ② 同队对局数最少 → ③ 跨积分组对局数最少 → ④ 双方总积分差之和最小。
               </p>
+
+              {plan.sameTeamCount > 0 && (
+                <SameTeamNotice plan={plan} standingById={standingById} />
+              )}
 
               {plan.byeId && (
                 <div className="bye-box">
@@ -166,7 +174,12 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
                   const sa = standingById.get(p.aId)!;
                   const sb = standingById.get(p.bId)!;
                   return (
-                    <li key={`${p.aId}-${p.bId}`} className={p.locked ? 'locked' : ''}>
+                    <li
+                      key={`${p.aId}-${p.bId}`}
+                      className={[p.locked ? 'locked' : '', p.sameTeam ? 'team-hit' : '']
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
                       <span className="idx">{i + 1}</span>
                       <span className="plan-names">
                         <PlayerChip s={sa} />
@@ -174,6 +187,11 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
                         <PlayerChip s={sb} />
                       </span>
                       <span className="plan-tags">
+                        {p.sameTeam && (
+                          <span className="tag team" title={`双方同属队伍「${p.team ?? ''}」`}>
+                            同队 · {p.team}
+                          </span>
+                        )}
                         {p.crossGroup && <span className="tag cross">跨组</span>}
                         {p.diff2 > 0 && (
                           <span className="tag">Δ {points2Label(p.diff2)}</span>
@@ -212,11 +230,58 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
 }
 
 function PlayerChip({ s }: { s: Standing }) {
+  const team = s.player.team?.trim();
   return (
     <span className="chip">
       {s.player.name}
+      {team && <em className="chip-team" title={`队伍：${team}`}>{team}</em>}
       <em>{points2Label(s.points2)}</em>
     </span>
+  );
+}
+
+/** 同队对局无法完全回避时：给出最少冲突数、涉及选手，并标注其中人工锁定的场次 */
+function SameTeamNotice({
+  plan,
+  standingById,
+}: {
+  plan: PairingPlan;
+  standingById: Map<string, Standing>;
+}) {
+  const hits = plan.pairs.filter((p) => p.sameTeam);
+  const byTeam = new Map<string, { pair: PlanPair; locked: boolean }[]>();
+  for (const p of hits) {
+    const t = p.team ?? '';
+    const list = byTeam.get(t) ?? [];
+    list.push({ pair: p, locked: p.locked });
+    byTeam.set(t, list);
+  }
+
+  return (
+    <div className="team-notice">
+      <h3>
+        ⚠ 受「禁止重复交手」与人工锁定约束，本轮无法完全回避同队对局：最少需要{' '}
+        <b>{plan.sameTeamCount}</b> 场同队对局
+        {plan.optimal ? '（已证明最少）' : '（当前可行方案中的最小值，未证明全局最优）'}
+      </h3>
+      <ul>
+        {[...byTeam.entries()].map(([t, items]) => (
+          <li key={t}>
+            队伍「{t}」：
+            {items
+              .map(({ pair, locked }) => {
+                const na = standingById.get(pair.aId)?.player.name ?? pair.aId;
+                const nb = standingById.get(pair.bId)?.player.name ?? pair.bId;
+                return `${na} vs ${nb}${locked ? '（人工锁定）' : ''}`;
+              })
+              .join('；')}
+          </li>
+        ))}
+      </ul>
+      <p className="hint">涉及选手：{[...new Set(hits.flatMap((p) => [p.aId, p.bId]))]
+        .map((id) => standingById.get(id)?.player.name ?? id)
+        .join('、')}</p>
+    </div>
   );
 }
 
@@ -243,10 +308,23 @@ function ManualRow({
     return a.name.localeCompare(b.name, 'zh-Hans-CN');
   });
 
+  const optionLabel = (pId: string) => {
+    const p = players.find((q) => q.id === pId);
+    const base = standingById.get(pId)?.player.name ?? p?.name ?? pId;
+    const t = p?.team?.trim();
+    return t ? `${base}（${t}）` : base;
+  };
+
   const optionsFor = (self: string, other: string | null) =>
     sorted.filter((p) => p.id === self || (other !== null && p.id === other) || !usedIds.has(p.id));
 
   const warn = !row.aId || !row.bId;
+  const sameTeam =
+    row.aId &&
+    row.bId &&
+    (players.find((p) => p.id === row.aId)?.team?.trim() ?? '') !== '' &&
+    (players.find((p) => p.id === row.aId)?.team?.trim() ?? '') ===
+      (players.find((p) => p.id === row.bId)?.team?.trim() ?? '');
 
   return (
     <div className={`manual-row ${warn ? 'incomplete' : ''}`}>
@@ -255,7 +333,7 @@ function ManualRow({
         <option value="">选择选手 A…</option>
         {optionsFor(row.aId, row.bId ?? null).map((p) => (
           <option key={p.id} value={p.id}>
-            {standingById.get(p.id)?.player.name ?? p.name}
+            {optionLabel(p.id)}
           </option>
         ))}
       </select>
@@ -264,10 +342,11 @@ function ManualRow({
         <option value="">选择选手 B…</option>
         {optionsFor(row.bId ?? '', row.aId).map((p) => (
           <option key={p.id} value={p.id}>
-            {standingById.get(p.id)?.player.name ?? p.name}
+            {optionLabel(p.id)}
           </option>
         ))}
       </select>
+      {sameTeam && <span className="tag team">同队对局（计入指标）</span>}
       <button className="btn tiny danger" onClick={onRemove}>
         移除
       </button>

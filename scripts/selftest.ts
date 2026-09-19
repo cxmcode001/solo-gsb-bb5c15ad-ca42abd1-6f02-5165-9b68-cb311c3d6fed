@@ -9,8 +9,10 @@ import {
 } from '../src/engine';
 
 let uid = 0;
-const mkPlayers = (names: string[]): Player[] =>
-  names.map((name) => ({ id: `p${++uid}`, name }));
+const mkPlayers = (entries: (string | { name: string; team?: string })[]): Player[] =>
+  entries.map((e) =>
+    typeof e === 'string' ? { id: `p${++uid}`, name: e } : { id: `p${++uid}`, name: e.name, team: e.team ?? '' },
+  );
 
 let mid = 0;
 const match = (a: string, b: string | null, result: 'win' | 'draw' | 'loss' = 'win') => ({
@@ -273,6 +275,116 @@ const lock = (a: string, b: string | null): DraftPair => ({
   }
   assert.ok(ms < 5000, `多轮约束配对应在 5s 内，实际 ${ms}ms`);
   console.log(`✓ 32 人 6 轮历史后配对：${ms}ms，跨组 ${plan.crossCount} 场`);
+}
+
+// 13. 同队回避：首轮 6 人（红 2、蓝 2、绿 2）应做到 0 场同队
+{
+  const ps = mkPlayers([
+    { name: 'R1', team: '红队' },
+    { name: 'R2', team: '红队' },
+    { name: 'B1', team: '蓝队' },
+    { name: 'B2', team: '蓝队' },
+    { name: 'G1', team: '绿队' },
+    { name: 'G2', team: '绿队' },
+  ]);
+  const plan = generatePairing({ players: ps, rounds: [], manual: [] });
+  assert.ok(plan.ok);
+  assert.strictEqual(plan.sameTeamCount, 0, `首轮应完全回避同队，实际 ${plan.sameTeamCount}`);
+  for (const p of plan.pairs) assert.strictEqual(p.sameTeam, false);
+  console.log('✓ 同队回避：首轮 0 场同队');
+}
+
+// 14. 同队无法回避：4 人均属红队，最少 2 场同队，且涉及选手全部列出
+{
+  const ps = mkPlayers([
+    { name: 'A', team: '红队' },
+    { name: 'B', team: '红队' },
+    { name: 'C', team: '红队' },
+    { name: 'D', team: '红队' },
+  ]);
+  const plan = generatePairing({ players: ps, rounds: [], manual: [] });
+  assert.ok(plan.ok);
+  assert.strictEqual(plan.sameTeamCount, 2);
+  assert.ok(plan.pairs.every((p) => p.sameTeam && p.team === '红队'));
+  console.log('✓ 同队回避：全员同队时冲突数最少');
+}
+
+// 15. 字典序：先最小化同队对局数。
+// 4 人 R1,R2=红队；B1,B2=蓝队。r1: R1 胜 B1、R2 胜 B2。
+// 积分：R1=R2=1，B1=B2=0；已交手 {R1-B1, R2-B2}。
+// 方案甲（旧的跨组优先）：R1-R2、B1-B2 => 同队 2、跨积分组 0
+// 方案乙（同队回避）：R1-B2、R2-B1 => 同队 0、跨积分组 2
+// 新规则必须以同队数为先选乙，即使跨组数更多。
+{
+  const ps = mkPlayers([
+    { name: 'R1', team: '红队' },
+    { name: 'R2', team: '红队' },
+    { name: 'B1', team: '蓝队' },
+    { name: 'B2', team: '蓝队' },
+  ]);
+  const [R1, R2, B1, B2] = ps;
+  const r1 = round([match(R1.id, B1.id, 'win'), match(R2.id, B2.id, 'win')]);
+  const plan = generatePairing({ players: ps, rounds: [r1], manual: [] });
+  assert.ok(plan.ok, plan.conflicts.map((c) => c.message).join(';'));
+  assert.strictEqual(plan.sameTeamCount, 0, `应优先回避同队，实际 ${plan.sameTeamCount}`);
+  assert.strictEqual(plan.crossCount, 2, '回避同队的代价是 2 场跨积分组');
+  const played = buildPlayedMap([r1]);
+  for (const p of plan.pairs) assert.ok(!played.has(pairKey(p.aId, p.bId)));
+  console.log('✓ 字典序：同队回避优先于跨积分组');
+}
+
+// 16. 人工锁定的同队对局允许保留并计入方案指标
+{
+  const ps = mkPlayers([
+    { name: 'R1', team: '红队' },
+    { name: 'R2', team: '红队' },
+    { name: 'B1', team: '蓝队' },
+    { name: 'B2', team: '蓝队' },
+  ]);
+  const [R1, R2] = ps;
+  const plan = generatePairing({
+    players: ps,
+    rounds: [],
+    manual: [lock(R1.id, R2.id)],
+  });
+  assert.ok(plan.ok, plan.conflicts.map((c) => c.message).join(';'));
+  const locked = plan.pairs.find((p) => p.locked);
+  assert.ok(locked && locked.sameTeam && locked.team === '红队', '锁定的同队对局必须保留并标记');
+  // 余下蓝队两人只能互赛 => 全局最少同队 2 场（锁定 1 + 自由 1）
+  assert.strictEqual(plan.sameTeamCount, 2);
+  const freeHit = plan.pairs.find((p) => !p.locked);
+  assert.ok(freeHit?.sameTeam && freeHit.team === '蓝队');
+  console.log('✓ 锁定同队对局保留且计入指标');
+}
+
+// 17. 修改队伍不影响历史赛果：积分榜与历史交手关系不变，仅下一轮方案改变
+{
+  const ps = mkPlayers(['A', 'B', 'C', 'D']);
+  const [A, B, C, D] = ps;
+  const r1 = round([match(A.id, B.id), match(C.id, D.id)]);
+  const before = computeStandings(ps, [r1]);
+  const playedBefore = buildPlayedMap([r1]);
+
+  // 把 A、C 改为同队（历史轮次数据完全不动）
+  const retag = ps.map((p) =>
+    p.id === A.id || p.id === C.id ? { ...p, team: '红队' } : p,
+  );
+  const after = computeStandings(retag, [r1]);
+  assert.deepStrictEqual(
+    after.map((s) => [s.player.id, s.points2]),
+    before.map((s) => [s.player.id, s.points2]),
+    '改队后积分必须不变',
+  );
+  assert.deepStrictEqual(buildPlayedMap([r1]), playedBefore, '历史交手关系不变');
+
+  // r2：A-C 为同队边应被回避（首轮后 A、C 1 分，B、D 0 分；可配 A-D、C-B，0 同队）
+  const plan = generatePairing({ players: retag, rounds: [r1], manual: [] });
+  assert.ok(plan.ok);
+  assert.strictEqual(plan.sameTeamCount, 0);
+  assert.ok(!plan.pairs.some((p) => p.aId === A.id && p.bId === C.id));
+  void B;
+  void D;
+  console.log('✓ 修改队伍不影响历史赛果');
 }
 
 console.log('\n全部引擎自测通过 ✅');
