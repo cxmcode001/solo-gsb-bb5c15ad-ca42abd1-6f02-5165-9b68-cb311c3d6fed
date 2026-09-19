@@ -5,6 +5,8 @@ export type MatchResult = 'win' | 'draw' | 'loss' | null;
 export interface Player {
   id: string;
   name: string;
+  /** 可选队伍名称；填写后配对器优先回避同队对局。历史赛果不记录队伍，改队不影响已完成轮次 */
+  team?: string;
 }
 
 /** 已确认的一场对局；bye 轮空也以 Match 表示（playerId 为轮空者） */

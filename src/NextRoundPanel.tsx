@@ -134,6 +134,12 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
                   对局数 <b>{plan.pairs.length}</b>
                 </span>
                 <span className="stat">
+                  同队对局{' '}
+                  <b className={plan.teamConflictCount > 0 ? 'danger-text' : ''}>
+                    {plan.teamConflictCount}
+                  </b>
+                </span>
+                <span className="stat">
                   跨积分组对局 <b className={plan.crossCount > 0 ? 'accent' : ''}>{plan.crossCount}</b>
                 </span>
                 <span className="stat">
@@ -147,8 +153,17 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
               </div>
 
               <p className="hint">
-                目标顺序：① 禁止重复交手 → ② 跨积分组对局数最少 → ③ 双方总积分差之和最小。
+                目标顺序：① 禁止重复交手 → ② 同队对局数最少 → ③ 跨积分组对局数最少 → ④ 双方总积分差之和最小。
+                人工锁定的同队对局允许保留，且计入方案指标。
               </p>
+
+              {plan.teamConflictCount > 0 && (
+                <div className="team-conflict-box">
+                  ⚠ 无法完全回避同队对局，最少需要{' '}
+                  <b>{plan.teamConflictCount}</b> 场（涉及选手见下方红色「同队」标记）。
+                  {plan.note && <div className="muted">{plan.note}</div>}
+                </div>
+              )}
 
               {plan.byeId && (
                 <div className="bye-box">
@@ -166,7 +181,10 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
                   const sa = standingById.get(p.aId)!;
                   const sb = standingById.get(p.bId)!;
                   return (
-                    <li key={`${p.aId}-${p.bId}`} className={p.locked ? 'locked' : ''}>
+                    <li
+                      key={`${p.aId}-${p.bId}`}
+                      className={`${p.locked ? 'locked' : ''} ${p.sameTeam ? 'team-conflict' : ''}`}
+                    >
                       <span className="idx">{i + 1}</span>
                       <span className="plan-names">
                         <PlayerChip s={sa} />
@@ -174,11 +192,16 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
                         <PlayerChip s={sb} />
                       </span>
                       <span className="plan-tags">
+                        {p.sameTeam && (
+                          <span className="tag team">同队 · {sa.player.team?.trim()}</span>
+                        )}
                         {p.crossGroup && <span className="tag cross">跨组</span>}
                         {p.diff2 > 0 && (
                           <span className="tag">Δ {points2Label(p.diff2)}</span>
                         )}
-                        {!p.crossGroup && p.diff2 === 0 && <span className="tag ok">同分组</span>}
+                        {!p.crossGroup && p.diff2 === 0 && !p.sameTeam && (
+                          <span className="tag ok">同分组</span>
+                        )}
                         {p.locked ? (
                           <span className="tag lock">🔒 锁定</span>
                         ) : (
@@ -212,9 +235,11 @@ export function NextRoundPanel({ players, rounds, manual, onManualChange, onComm
 }
 
 function PlayerChip({ s }: { s: Standing }) {
+  const team = s.player.team?.trim();
   return (
     <span className="chip">
       {s.player.name}
+      {team && <em className="chip-team">{team}</em>}
       <em>{points2Label(s.points2)}</em>
     </span>
   );
@@ -256,6 +281,7 @@ function ManualRow({
         {optionsFor(row.aId, row.bId ?? null).map((p) => (
           <option key={p.id} value={p.id}>
             {standingById.get(p.id)?.player.name ?? p.name}
+            {p.team?.trim() ? `（${p.team.trim()}）` : ''}
           </option>
         ))}
       </select>
@@ -265,6 +291,7 @@ function ManualRow({
         {optionsFor(row.bId ?? '', row.aId).map((p) => (
           <option key={p.id} value={p.id}>
             {standingById.get(p.id)?.player.name ?? p.name}
+            {p.team?.trim() ? `（${p.team.trim()}）` : ''}
           </option>
         ))}
       </select>

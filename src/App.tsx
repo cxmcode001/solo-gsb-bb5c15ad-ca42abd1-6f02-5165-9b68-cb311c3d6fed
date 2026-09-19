@@ -29,15 +29,29 @@ export default function App() {
     [standings],
   );
 
-  const addPlayers = (names: string[]) => {
+  const addPlayers = (entries: { name: string; team?: string }[]) => {
     setState((s) => ({
       ...s,
-      players: [...s.players, ...names.map((n) => ({ id: uid('p'), name: n }))].slice(0, 32),
+      players: [
+        ...s.players,
+        ...entries.map((e) => ({ id: uid('p'), name: e.name, team: e.team || undefined })),
+      ].slice(0, 32),
     }));
   };
 
   const removePlayer = (id: string) => {
     setState((s) => ({ ...s, players: s.players.filter((p) => p.id !== id) }));
+  };
+
+  /** 修改队伍（或清空）；队伍只属于选手资料，历史轮次按 id 记录，不受改队影响 */
+  const updatePlayerTeam = (id: string, team: string) => {
+    const trimmed = team.trim();
+    setState((s) => ({
+      ...s,
+      players: s.players.map((p) =>
+        p.id === id ? { ...p, team: trimmed ? trimmed : undefined } : p,
+      ),
+    }));
   };
 
   const setResult = (roundId: string, matchId: string, resultA: Match['resultA']) => {
@@ -95,7 +109,12 @@ export default function App() {
 
   const loadDemo = () => {
     if (state.players.length > 0 && !window.confirm('载入示例将覆盖当前数据，确定？')) return;
-    const players = DEMO_NAMES.map((name) => ({ id: uid('p'), name }));
+    const players = DEMO_NAMES.map((name) => ({
+      id: uid('p'),
+      name,
+      // 前 3 人「红队」、后 3 人「蓝队」，演示同队回避
+      team: DEMO_NAMES.indexOf(name) < 3 ? '红队' : '蓝队',
+    }));
     const [a, b, c, d, e, f] = players;
     const win = (x: string, y: string): Match => ({
       id: uid('m'),
@@ -119,7 +138,7 @@ export default function App() {
         <div>
           <h1>桌游联赛 · 瑞士制配对</h1>
           <p className="subtitle">
-            最多 32 人 · 禁止重复交手 · 依次最小化跨积分组对局数与总积分差 · 奇数人自动轮空
+            最多 32 人 · 禁止重复交手 · 依次最小化同队对局数、跨积分组对局数与总积分差 · 奇数人自动轮空
           </p>
         </div>
         <div className="top-actions">
@@ -143,6 +162,7 @@ export default function App() {
             hasRounds={state.rounds.length > 0}
             onAdd={addPlayers}
             onRemove={removePlayer}
+            onUpdateTeam={updatePlayerTeam}
           />
           <StandingsTable standings={standings} />
         </div>

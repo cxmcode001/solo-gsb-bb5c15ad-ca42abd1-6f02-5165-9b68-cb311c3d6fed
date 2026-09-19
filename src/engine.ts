@@ -93,6 +93,18 @@ export function pairKey(a: string, b: string): string {
   return a < b ? `${a}|${b}` : `${b}|${a}`;
 }
 
+/** 规范化队伍名：去首尾空白；空串视为无队伍（不参与同队回避） */
+export function teamOf(player: Player): string {
+  return player.team?.trim() ?? '';
+}
+
+/** 两名选手是否属于同一支（非空）队伍 */
+export function sameTeam(a: Player, b: Player): boolean {
+  const ta = teamOf(a);
+  const tb = teamOf(b);
+  return ta !== '' && ta === tb;
+}
+
 /** 历史上已经交手过的无序对局集合（轮空不算交手） */
 export function buildPlayedMap(rounds: Round[]): Set<string> {
   const played = new Set<string>();
@@ -119,6 +131,7 @@ export interface PlanPair {
   aId: string;
   bId: string; // 非轮空对局
   locked: boolean;
+  sameTeam: boolean;
   crossGroup: boolean;
   diff2: number;
 }
@@ -127,6 +140,7 @@ export interface PairingPlan {
   ok: boolean;
   pairs: PlanPair[];
   byeId: string | null;
+  teamConflictCount: number;
   crossCount: number;
   totalDiff2: number;
   conflicts: PlanConflict[];
@@ -150,6 +164,7 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
     ok: false,
     pairs: [],
     byeId: null,
+    teamConflictCount: 0,
     crossCount: 0,
     totalDiff2: 0,
     conflicts: [],
@@ -204,6 +219,17 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
     seenLocked.add(row.aId);
     seenLocked.add(row.bId);
     lockedPairs.push({ pairId: row.id, aId: row.aId, bId: row.bId });
+  }
+
+  // 同队锁定对局合法但计入指标，给出明确提示
+  for (const lp of lockedPairs) {
+    const sa = standingById.get(lp.aId)!;
+    const sb = standingById.get(lp.bId)!;
+    if (sameTeam(sa.player, sb.player)) {
+      warnings.push(
+        `锁定对局 ${sa.player.name} vs ${sb.player.name} 为同队（${teamOf(sa.player)}队），按规则保留并计入同队对局指标。`,
+      );
+    }
   }
 
   if (conflicts.length > 0) return { ...empty, conflicts, warnings };
@@ -273,17 +299,78 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
   const componentConflicts = checkComponents(free, legal, lockedPairs, played);
   if (componentConflicts) return { ...empty, conflicts: componentConflicts, warnings, byeId };
 
-  // ---- 5. 分支限界搜索，字典序最小化 (跨组数, 总积分差) ----
-  // 积分组：相同 points2 为一组
+  // ---- 5. 分支限界搜索，字典序最小化 (同队对局数, 跨组数, 总积分差) ----
+  // 积分组：相同 points2 为一组；队伍：同名的非空 team 为一组
   const distinctScores = [...new Set(free.map((s) => s.points2))].sort((a, b) => b - a);
   const groupAt = (i: number) => distinctScores.indexOf(free[i].points2);
 
+  const edgeTeam = (i: number, j: number) => {
+    const ti = teamOf(free[i].player);
+    return ti !== '' && ti === teamOf(free[j].player) ? 1 : 0;
+  };
   const edgeCross = (i: number, j: number) => (groupAt(i) === groupAt(j) ? 0 : 1);
   const edgeDiff = (i: number, j: number) => Math.abs(free[i].points2 - free[j].points2);
+
+  // 锁定对局的指标固定计入方案（允许锁定同队对局，只统计不禁止）
+  let lockedTeam = 0;
+  let lockedCross = 0;
+  let lockedDiff = 0;
+  for (const lp of lockedPairs) {
+    const sa = standingById.get(lp.aId)!;
+    const sb = standingById.get(lp.bId)!;
+    if (sameTeam(sa.player, sb.player)) lockedTeam++;
+    if (sa.points2 !== sb.points2) lockedCross++;
+    lockedDiff += Math.abs(sa.points2 - sb.points2);
+  }
+
+  /**
+   * 给定剩余顶点集合的同队边数下界（割下界）：
+   * 对任意一支队伍 T，每条非 T 队的边最多「接走」一名 T 队成员，
+   * 故至少 max(0, |T| - (N - |T|)) 名 T 队成员只能内部配对，即至少 ceil(差/2) 条同队边；
+   * 取所有队伍（含无队伍集合，其内部边不计同队，只需在普通队伍上计算）的最大值。
+   * 奇人数场景再叠加奇偶下界。
+   */
+  function teamLowerBoundFor(remUsed: boolean[]): number {
+    const counts = new Map<string, number>();
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+      if (remUsed[i]) continue;
+      total++;
+      const t = teamOf(free[i].player);
+      if (t !== '') counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+    let lb = 0;
+    for (const c of counts.values()) {
+      const outside = total - c;
+      if (c > outside) lb = Math.max(lb, Math.ceil((c - outside) / 2));
+    }
+    let odd = 0;
+    for (const c of counts.values()) if (c % 2 === 1) odd++;
+    return Math.max(lb, Math.floor(odd / 2));
+  }
+
+  // 当所有自由选手都属于（若干支）奇人数队伍时，任何完整配对的同队场数都恰好为奇偶下界，
+  // 同队目标退化为常量：预置该值后搜索等价于两级目标，避免「全部同队」等场景的无谓枚举。
+  let fixedTeam = 0;
+  {
+    const allInTeam = free.every((s) => teamOf(s.player) !== '');
+    if (allInTeam) {
+      const counts = new Map<string, number>();
+      for (const s of free) {
+        const t = teamOf(s.player);
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+      let allOdd = true;
+      for (const c of counts.values()) if (c % 2 === 0) allOdd = false;
+      if (allOdd) fixedTeam = teamLowerBoundFor(new Array<boolean>(n).fill(false));
+    }
+  }
 
   const used = new Array<boolean>(n).fill(false);
   const chosenEdges: [number, number][] = [];
   let bestEdges: [number, number][] | null = null;
+  // fixedTeam > 0 时同队目标已是常量（见上），预置其值后搜索等价于两级目标
+  let bestTeam: number = lockedTeam + fixedTeam;
   let bestCross = Infinity;
   let bestDiff = Infinity;
   let nodes = 0;
@@ -298,23 +385,43 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
     return Math.floor(need / 2);
   }
 
-  function search(curCross: number, curDiff: number) {
+  function search(curTeam: number, curCross: number, curDiff: number) {
     if (++nodes > NODE_BUDGET) {
       aborted = true;
       return;
     }
     if (chosenEdges.length === n / 2) {
-      if (curCross < bestCross || (curCross === bestCross && curDiff < bestDiff)) {
-        bestCross = curCross;
-        bestDiff = curDiff;
+      const totTeam = lockedTeam + curTeam;
+      const totCross = lockedCross + curCross;
+      const totDiff = lockedDiff + curDiff;
+      if (
+        bestEdges === null ||
+        totTeam < bestTeam ||
+        (totTeam === bestTeam && totCross < bestCross) ||
+        (totTeam === bestTeam && totCross === bestCross && totDiff < bestDiff)
+      ) {
+        bestTeam = totTeam;
+        bestCross = totCross;
+        bestDiff = totDiff;
         bestEdges = chosenEdges.slice();
       }
       return;
     }
 
-    // 剪枝：跨组下界 + 已有最优
-    const lb = curCross + crossParityLowerBound();
-    if (bestEdges !== null && (lb > bestCross || (lb === bestCross && curDiff >= bestDiff))) return;
+    // 剪枝：同队/跨组割与奇偶下界 + 已有最优（按字典序比较）
+    const lbT = curTeam + teamLowerBoundFor(used);
+    if (bestEdges !== null) {
+      if (lbT > bestTeam - lockedTeam) return;
+      if (lbT === bestTeam - lockedTeam) {
+        const lbC = curCross + crossParityLowerBound();
+        if (lbC > bestCross - lockedCross) return;
+        if (lbC === bestCross - lockedCross && lockedDiff + curDiff >= bestDiff) return;
+      }
+    } else if (fixedTeam > 0 && lbT > fixedTeam) {
+      // 同队数已被证明为常量 fixedTeam：首个可行方案只需不超过该值；
+      // 跨组/积分差的字典序剪枝等第一个可行方案出现后再生效
+      return;
+    }
 
     // MRV：可选合法搭档最少的未配对选手优先；同分优先（优先尝试组内，尽快得到优解）
     let pivot = -1;
@@ -336,8 +443,11 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
     for (let j = 0; j < n; j++) {
       if (!used[j] && j !== pivot && legal[pivot][j]) partners.push(j);
     }
-    // 优先组内、积分差小，利于先得到优解从而加强剪枝
+    // 优先跨队（非同队）、组内、积分差小，利于先得到优解从而加强剪枝
     partners.sort((x, y) => {
+      const tx = edgeTeam(pivot, x);
+      const ty = edgeTeam(pivot, y);
+      if (tx !== ty) return tx - ty;
       const cx = edgeCross(pivot, x);
       const cy = edgeCross(pivot, y);
       if (cx !== cy) return cx - cy;
@@ -354,7 +464,7 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
       used[pivot] = true;
       used[j] = true;
       chosenEdges.push([pivot, j]);
-      search(curCross + edgeCross(pivot, j), curDiff + edgeDiff(pivot, j));
+      search(curTeam + edgeTeam(pivot, j), curCross + edgeCross(pivot, j), curDiff + edgeDiff(pivot, j));
       chosenEdges.pop();
       used[j] = false;
       used[pivot] = false;
@@ -362,7 +472,7 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
     }
   }
 
-  search(0, 0);
+  search(0, 0, 0);
 
   if (!bestEdges) {
     return {
@@ -376,34 +486,41 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
 
   // ---- 6. 组装结果（锁定对 + 自由对） ----
   const planPairs: PlanPair[] = [];
+  let teamConflictCount = 0;
   let crossCount = 0;
   let totalDiff2 = 0;
 
   for (const lp of lockedPairs) {
     const sa = standingById.get(lp.aId)!;
     const sb = standingById.get(lp.bId)!;
-    const cross = sa.points2 !== sb.points2 ? 1 : 0;
+    const isTeam = sameTeam(sa.player, sb.player);
+    const cross = sa.points2 !== sb.points2;
     const diff = Math.abs(sa.points2 - sb.points2);
-    crossCount += cross;
+    if (isTeam) teamConflictCount++;
+    if (cross) crossCount++;
     totalDiff2 += diff;
     planPairs.push({
       aId: lp.aId,
       bId: lp.bId,
       locked: true,
-      crossGroup: cross === 1,
+      sameTeam: isTeam,
+      crossGroup: cross,
       diff2: diff,
     });
   }
 
   for (const [i, j] of finalEdges) {
+    const isTeam = edgeTeam(i, j) === 1;
     const cross = edgeCross(i, j) === 1;
     const diff = edgeDiff(i, j);
+    if (isTeam) teamConflictCount++;
     crossCount += cross ? 1 : 0;
     totalDiff2 += diff;
     planPairs.push({
       aId: free[i].player.id,
       bId: free[j].player.id,
       locked: false,
+      sameTeam: isTeam,
       crossGroup: cross,
       diff2: diff,
     });
@@ -420,12 +537,24 @@ export function generatePairing(opts: GenerateOptions): PairingPlan {
     ok: true,
     pairs: planPairs,
     byeId,
+    teamConflictCount,
     crossCount,
     totalDiff2,
     conflicts: [],
     warnings,
     optimal: !aborted,
   };
+  if (teamConflictCount > 0) {
+    const involved: string[] = [];
+    for (const p of planPairs) {
+      if (!p.sameTeam) continue;
+      involved.push(
+        `${standingById.get(p.aId)!.player.name} vs ${standingById.get(p.bId)!.player.name}` +
+          `（${teamOf(standingById.get(p.aId)!.player)}队${p.locked ? '·锁定' : ''}）`,
+      );
+    }
+    result.note = `受历史交手与锁定约束限制，本轮无法完全回避同队对局；最少为 ${teamConflictCount} 场：${involved.join('；')}。`;
+  }
   if (aborted) {
     result.warnings = [
       ...warnings,

@@ -270,6 +270,17 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.player-list .team-input {
+  width: 92px;
+  flex: none;
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+
+.danger-text {
+  color: #ff9aa3;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -455,6 +466,41 @@ textarea:focus {
   color: #e0b8f0;
   border-color: rgba(192, 120, 224, 0.6);
   background: rgba(192, 120, 224, 0.12);
+}
+
+.tag.team {
+  color: #ff9aa3;
+  border-color: rgba(224, 82, 96, 0.65);
+  background: rgba(224, 82, 96, 0.14);
+  font-weight: 600;
+}
+
+.chip em.chip-team {
+  color: #7fb0ff;
+  font-size: 10.5px;
+  border: 1px solid rgba(127, 176, 255, 0.35);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+
+.plan-list li.team-conflict {
+  border-color: rgba(224, 82, 96, 0.65);
+  background: rgba(224, 82, 96, 0.08);
+}
+
+.team-conflict-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(224, 82, 96, 0.55);
+  background: rgba(224, 82, 96, 0.08);
+  border-radius: 8px;
+  font-size: 13px;
+  color: #ff9aa3;
+}
+
+.team-conflict-box .muted {
+  margin-top: 4px;
+  font-size: 12px;
 }
 
 .tag.lock {

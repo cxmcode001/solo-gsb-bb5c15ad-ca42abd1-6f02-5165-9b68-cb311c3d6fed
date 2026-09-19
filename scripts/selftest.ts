@@ -9,8 +9,10 @@ import {
 } from '../src/engine';
 
 let uid = 0;
-const mkPlayers = (names: string[]): Player[] =>
-  names.map((name) => ({ id: `p${++uid}`, name }));
+const mkPlayers = (
+  names: string[],
+  teams?: Record<string, string>,
+): Player[] => names.map((name) => ({ id: `p${++uid}`, name, team: teams?.[name] }));
 
 let mid = 0;
 const match = (a: string, b: string | null, result: 'win' | 'draw' | 'loss' = 'win') => ({
@@ -183,7 +185,96 @@ const lock = (a: string, b: string | null): DraftPair => ({
   console.log('✓ 字典序优化（先跨组数后积分差）');
 }
 
-// 9. 32 人规模性能
+// 9. 同队回避：首轮 6 人，红队 A B C、蓝队 D E F，应 0 场同队（正好红蓝对配，且 0 跨组）
+{
+  const ps = mkPlayers(['A', 'B', 'C', 'D', 'E', 'F'], {
+    A: '红队', B: '红队', C: '红队', D: '蓝队', E: '蓝队', F: '蓝队',
+  });
+  const plan = generatePairing({ players: ps, rounds: [], manual: [] });
+  assert.ok(plan.ok, plan.conflicts.map((c) => c.message).join(';'));
+  assert.strictEqual(plan.teamConflictCount, 0, '首轮应完全回避同队');
+  for (const p of plan.pairs) assert.strictEqual(p.sameTeam, false);
+  console.log('✓ 同队回避：0 场同队');
+}
+
+// 9b. 同队无法完全回避：4 人全在红队，最少 2 场同队，且标记涉及选手
+{
+  const ps = mkPlayers(['A', 'B', 'C', 'D'], {
+    A: '红队', B: '红队', C: '红队', D: '红队',
+  });
+  const plan = generatePairing({ players: ps, rounds: [], manual: [] });
+  assert.ok(plan.ok);
+  assert.strictEqual(plan.teamConflictCount, 2, '4 人同队必有 2 场同队');
+  assert.ok(plan.pairs.every((p) => p.sameTeam));
+  assert.ok(plan.note && plan.note.includes('无法完全回避同队'), '应给出最少冲突数说明');
+  console.log('✓ 同队回避：无法回避时给出最少冲突数');
+}
+
+// 9c. 字典序：同队数优先于跨组数。
+// 4 人首轮：红队 A D（异分组来源：制造积分差），蓝队 B C。
+// r1: A 胜 B，D 胜 C => 积分 A,D=1（但 A、D 同红队）；B,C=0（同蓝队）
+// 第 2 轮可能：
+//   方案甲 A-C + D-B：0 同队、2 跨组
+//   方案乙 A-D + B-C：2 同队（锁不锁都一样）、0 跨组
+// 必须选方案甲：同队数最少优先，即使跨组更多。
+{
+  const ps = mkPlayers(['A', 'B', 'C', 'D'], {
+    A: '红队', D: '红队', B: '蓝队', C: '蓝队',
+  });
+  const [A, B, C, D] = ps;
+  const r1 = round([match(A.id, B.id), match(D.id, C.id)]);
+  const plan = generatePairing({ players: ps, rounds: [r1], manual: [] });
+  assert.ok(plan.ok, plan.conflicts.map((c) => c.message).join(';'));
+  assert.strictEqual(plan.teamConflictCount, 0, '应优先把同队数压到 0');
+  assert.strictEqual(plan.crossCount, 2, `同队 0 的方案必有 2 场跨组，实际 ${plan.crossCount}`);
+  const played = buildPlayedMap([r1]);
+  for (const p of plan.pairs) assert.ok(!played.has(pairKey(p.aId, p.bId)));
+  console.log('✓ 字典序优化：同队数优先于跨组数');
+}
+
+// 9d. 人工锁定同队对局：允许保留并计入指标，其余对局继续优化
+{
+  const ps = mkPlayers(['A', 'B', 'C', 'D', 'E', 'F'], {
+    A: '红队', B: '红队', C: '红队', D: '蓝队', E: '蓝队', F: '蓝队',
+  });
+  const [A, B, C, D, E, F] = ps;
+  const plan = generatePairing({ players: ps, rounds: [], manual: [lock(A.id, B.id)] });
+  assert.ok(plan.ok, plan.conflicts.map((c) => c.message).join(';'));
+  const locked = plan.pairs.find((p) => p.locked)!;
+  assert.strictEqual(locked.sameTeam, true);
+  // 锁定 A-B 后自由选手为 红队 C + 蓝队 D/E/F：蓝队奇人数必然再产生 1 场同队
+  assert.strictEqual(plan.teamConflictCount, 2, '锁定同队场计入，自由部分已取到最少 1 场');
+  const freeSameTeam = plan.pairs.filter((p) => !p.locked && p.sameTeam);
+  assert.strictEqual(freeSameTeam.length, 1);
+  assert.ok(plan.warnings.some((w) => w.includes('同队')), '应提示锁定场为同队');
+  void C; void D; void E; void F;
+  console.log('✓ 人工锁定同队对局：保留并计入指标');
+}
+
+// 9e. 修改队伍不影响历史赛果：历史轮次不含队伍，改队后积分照旧、回避按新队执行
+{
+  const ps = mkPlayers(['A', 'B', 'C', 'D']);
+  const [A, B, C, D] = ps;
+  const r1 = round([match(A.id, B.id), match(C.id, D.id)]);
+  const before = computeStandings(ps, [r1]);
+  // 赛后才分队：A C 同队
+  const ps2 = ps.map((p) =>
+    p.id === A.id || p.id === C.id ? { ...p, team: '红队' } : { ...p, team: '蓝队' },
+  );
+  const after = computeStandings(ps2, [r1]);
+  assert.deepStrictEqual(
+    after.map((s) => [s.player.id, s.points2]),
+    before.map((s) => [s.player.id, s.points2]),
+    '改队后历史积分必须保持不变',
+  );
+  // r1 已打 A-B、C-D；第 2 轮合法边 A-C（同队）、B-D（同队）、A-D、B-C
+  // 0 同队方案 A-D + B-C 可行，应选中
+  const plan = generatePairing({ players: ps2, rounds: [r1], manual: [] });
+  assert.ok(plan.ok, plan.conflicts.map((c) => c.message).join(';'));
+  assert.strictEqual(plan.teamConflictCount, 0);
+  console.log('✓ 修改队伍不影响历史赛果，回避按新队伍执行');
+}
+
 {
   const ps = mkPlayers(Array.from({ length: 32 }, (_, i) => `P${i + 1}`));
   // 每人都已打过 3 轮（制造约束），用引擎反推不易；直接首轮同分组最坏情况
